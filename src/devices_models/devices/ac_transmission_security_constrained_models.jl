@@ -757,15 +757,6 @@ function construct_device!(
     end
 
     add_feedforward_arguments!(container, device_model, devices)
-
-    add_expressions!(
-        container,
-        PTDFBranchFlow,
-        devices,
-        device_model,
-        network_model,
-    )
-
     return
 end
 
@@ -781,6 +772,18 @@ function construct_device!(
     X <: AbstractPTDFModel,
 }
     devices = get_available_components(device_model, sys)
+
+    # The base-case flows are built here, as StaticBranch builds them, and not in the
+    # ArgumentConstructStage: every injection (an HVDC link's terminals among them,
+    # added in its own ArgumentConstructStage) must be in the nodal balance first.
+    # The order of these methods is important. The add_expressions! must be before the constraints
+    add_expressions!(
+        container,
+        PTDFBranchFlow,
+        devices,
+        device_model,
+        network_model,
+    )
 
     add_constraints!(container, FlowRateConstraint, devices, device_model, network_model)
     add_feedforward_constraints!(container, device_model, devices)

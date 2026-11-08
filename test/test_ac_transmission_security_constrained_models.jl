@@ -675,6 +675,64 @@ end
     @test n_checked >= 1
 end
 
+@testset "Security-constrained PTDFBranchFlow includes HVDC terminal injections" begin
+    # The base-case flows must be PTDF × the complete nodal balance. An HVDC link adds its
+    # terminal injections to the nodal balance in its own ArgumentConstructStage, so flows
+    # built before every argument stage has run (the template's branches are a Dict) miss
+    # them, and the base-case limits are enforced on flows that ignore the link.
+    for hvdc_formulation in (HVDCTwoTerminalLossless, HVDCTwoTerminalDispatch)
+        @testset "$hvdc_formulation" begin
+            c_sys5_dc = PSB.build_system(PSITestSystems, "c_sys5_dc")
+            lines = collect(get_components(Line, c_sys5_dc))
+            for line in sort(lines; by = get_name)[1:2]
+                transition = GeometricDistributionForcedOutage(;
+                    mean_time_to_recovery = 10,
+                    outage_transition_probability = 0.9999,
+                    monitored_components = lines,
+                )
+                add_supplemental_attribute!(c_sys5_dc, line, transition)
+            end
+            template = get_thermal_dispatch_template_network(NetworkModel(PTDFPowerModel))
+            set_device_model!(template, Line, SecurityConstrainedStaticBranch)
+            set_device_model!(template, TwoTerminalGenericHVDCLine, hvdc_formulation)
+            ps_model = DecisionModel(template, c_sys5_dc; optimizer = HiGHS_optimizer)
+            @test build!(ps_model; output_dir = mktempdir(; cleanup = true)) ==
+                  PSI.ModelBuildStatus.BUILT
+
+            container = PSI.get_optimization_container(ps_model)
+            network_model = PSI.get_network_model(PSI.get_template(ps_model))
+            ground_truth_ptdf = PNM.VirtualPTDF(c_sys5_dc)
+            nodal_balance =
+                PSI.get_expression(container, PSI.ActivePowerBalance(), PSY.ACBus).data
+            hvdc_vars = Set{JuMP.VariableRef}()
+            for (key, var) in PSI.get_variables(container)
+                PSI.get_component_type(key) <: TwoTerminalGenericHVDCLine || continue
+                union!(hvdc_vars, vec(var.data))
+            end
+            @test !isempty(hvdc_vars)
+
+            pbf = PSI.get_expression(container, PSI.PTDFBranchFlow(), Line)
+            n_with_hvdc = 0
+            for (name, (arc, _)) in
+                PNM.get_name_to_arc_map(network_model.network_reduction, Line)
+                ptdf_col = ground_truth_ptdf[arc, :]
+                for t in PSI.get_time_steps(container)
+                    expected = JuMP.AffExpr(0.0)
+                    for i in eachindex(ptdf_col)
+                        abs(ptdf_col[i]) > PSI.PTDF_ZERO_TOL || continue
+                        JuMP.add_to_expression!(expected, ptdf_col[i], nodal_balance[i, t])
+                    end
+                    @test aff_exprs_approx_equal(pbf[name, t], expected)
+                    any(v -> v in hvdc_vars, keys(pbf[name, t].terms)) &&
+                        (n_with_hvdc += 1)
+                end
+            end
+            # the link's injections reach the base-case flows
+            @test n_with_hvdc > 0
+        end
+    end
+end
+
 @testset "PTDFBranchFlow member orientation sign under network reduction" begin
     # Regression: degree-two series-reduction members whose native arc opposes
     # the merged path were reported with the representative's sign.
