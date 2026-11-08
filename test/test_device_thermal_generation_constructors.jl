@@ -179,6 +179,8 @@ end
     # (a LinearCurve's slope, a linear FuelCurve's fuel × price, a VOM term) must also be
     # charged on P_min · on. Each compact formulation is held to the formulation it compacts:
     # same optimal objective, same production cost, from the data's initial conditions.
+    # On c_sys5_uc the ramps bind, so Standard against Compact there also holds Compact's
+    # ramp limits to Standard's on total output.
     function _linearize_costs!(sys)
         for g in get_components(ThermalStandard, sys)
             op = get_operation_cost(g)
@@ -242,8 +244,6 @@ end
         ("sys5_uc_linear", () -> _linearize_costs!(build_system(PSITestSystems, "c_sys5_uc"))),
     ]
     for (label, make_sys) in cases, (full, compact) in pairs
-        # c_sys5_uc's ramps bind, and Compact's ramp limits differ from Standard's (separate fix)
-        label == "sys5_uc_linear" && full == ThermalStandardUnitCommitment && continue
         @testset "$label: $(nameof(compact)) = $(nameof(full))" begin
             obj_full, prod_full = _solve(make_sys(), full, label)
             obj_compact, prod_compact = _solve(make_sys(), compact, label)

@@ -310,6 +310,17 @@ function add_linear_ramp_constraints!(
     return
 end
 
+"""
+The output a start-up (or shut-down) adds to the ramp limit in
+`add_semicontinuous_ramp_constraints!`. On total output (`ActivePowerVariable`) a unit
+starting up jumps from 0 to at least P_min, so the limit gains P_min · start. On the
+output above P_min (`PowerAboveMinimumVariable`, the compact formulations) the jump to
+P_min is not in the variable, so nothing is added: with P = P_min · on + p, the total
+output's ramp constraints are exactly p_t - p_{t-1} <= R_up and p_{t-1} - p_t <= R_down.
+"""
+_ramp_start_stop_power(::Type{ActivePowerVariable}, power_limits) = power_limits.min
+_ramp_start_stop_power(::Type{PowerAboveMinimumVariable}, power_limits) = 0.0
+
 @doc raw"""
 Constructs allowed rate-of-change constraints from variables, initial condtions, start/stop status, and rate data
 
@@ -384,6 +395,7 @@ function add_semicontinuous_ramp_constraints!(
         device = get_component(ic)
         ramp_limits = PSY.get_ramp_limits(device)
         power_limits = PSY.get_active_power_limits(device)
+        start_stop_power = _ramp_start_stop_power(U, power_limits)
         ic_power = get_value(ic)
         @debug "add rate_of_change_constraint" name ic_power
 
@@ -398,9 +410,9 @@ function add_semicontinuous_ramp_constraints!(
             rhd_dn = ramp_limits.down * minutes_per_period
         else
             rhs_up =
-                ramp_limits.up * minutes_per_period + power_limits.min * varstart[name, 1]
+                ramp_limits.up * minutes_per_period + start_stop_power * varstart[name, 1]
             rhd_dn =
-                ramp_limits.down * minutes_per_period + power_limits.min * varstop[name, 1]
+                ramp_limits.down * minutes_per_period + start_stop_power * varstop[name, 1]
         end
         sl_ub, sl_lb = _get_ramp_slack_vars(container, model, name, 1)
         con_up[name, 1] = JuMP.@constraint(
@@ -409,7 +421,7 @@ function add_semicontinuous_ramp_constraints!(
             if must_run
                 ramp_limits.up * minutes_per_period
             else
-                ramp_limits.up * minutes_per_period + power_limits.min * varstart[name, 1]
+                ramp_limits.up * minutes_per_period + start_stop_power * varstart[name, 1]
             end
         )
         con_down[name, 1] = JuMP.@constraint(
@@ -418,7 +430,7 @@ function add_semicontinuous_ramp_constraints!(
             if must_run
                 ramp_limits.down * minutes_per_period
             else
-                ramp_limits.down * minutes_per_period + power_limits.min * varstop[name, 1]
+                ramp_limits.down * minutes_per_period + start_stop_power * varstop[name, 1]
             end
         )
         for t in time_steps[2:end]
@@ -429,7 +441,7 @@ function add_semicontinuous_ramp_constraints!(
                 if must_run
                     ramp_limits.up * minutes_per_period
                 else
-                    ramp_limits.up * minutes_per_period + power_limits.min * varstart[name, t]
+                    ramp_limits.up * minutes_per_period + start_stop_power * varstart[name, t]
                 end
             )
             con_down[name, t] = JuMP.@constraint(
@@ -438,7 +450,7 @@ function add_semicontinuous_ramp_constraints!(
                 if must_run
                     ramp_limits.down * minutes_per_period
                 else
-                    ramp_limits.down * minutes_per_period + power_limits.min * varstop[name, t]
+                    ramp_limits.down * minutes_per_period + start_stop_power * varstop[name, t]
                 end
             )
         end
