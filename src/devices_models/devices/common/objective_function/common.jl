@@ -217,6 +217,14 @@ function _add_vom_cost_to_objective!(
             )
         add_to_expression!(container, VOMCostExpression, exp, component, t)
     end
+    _add_compact_pmin_proportional_cost!(
+        container,
+        T(),
+        component,
+        cost_term_normalized * multiplier,
+        U(),
+        VOMCostExpression,
+    )
     return
 end
 

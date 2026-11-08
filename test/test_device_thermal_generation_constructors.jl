@@ -174,6 +174,86 @@ end
 end
 =#
 
+@testset "Compact formulations charge proportional costs on the output up to P_min" begin
+    # PowerAboveMinimumVariable is the output above P_min, so a cost proportional to output
+    # (a LinearCurve's slope, a linear FuelCurve's fuel × price, a VOM term) must also be
+    # charged on P_min · on. Each compact formulation is held to the formulation it compacts:
+    # same optimal objective, same production cost, from the data's initial conditions.
+    function _linearize_costs!(sys)
+        for g in get_components(ThermalStandard, sys)
+            op = get_operation_cost(g)
+            vc = get_variable(op)
+            fd = get_function_data(get_value_curve(vc))
+            set_variable!(
+                op,
+                CostCurve(
+                    LinearCurve(get_proportional_term(fd), get_constant_term(fd)),
+                    get_power_units(vc),
+                ),
+            )
+        end
+        return sys
+    end
+    function _set_vom!(sys, vom)
+        for g in get_components(ThermalStandard, sys)
+            op = get_operation_cost(g)
+            vc = get_variable(op)
+            vc isa CostCurve || continue
+            set_variable!(
+                op,
+                CostCurve(get_value_curve(vc), get_power_units(vc), LinearCurve(vom)),
+            )
+        end
+        return sys
+    end
+    function _solve(sys, formulation, label)
+        template = ProblemTemplate(NetworkModel(CopperPlatePowerModel))
+        set_device_model!(template, ThermalStandard, formulation)
+        set_device_model!(template, PowerLoad, StaticPowerLoad)
+        model = DecisionModel(
+            template,
+            sys;
+            name = "compact_pmin_$(label)_$(nameof(formulation))",
+            optimizer = HiGHS_optimizer_exact,
+            initialize_model = false,
+        )
+        @test build!(model; output_dir = mktempdir(; cleanup = true)) ==
+              PSI.ModelBuildStatus.BUILT
+        @test solve!(model) == PSI.RunStatus.SUCCESSFULLY_FINALIZED
+        results = OptimizationProblemResults(model)
+        expr = read_expression(
+            results,
+            "ProductionCostExpression__ThermalStandard";
+            table_format = TableFormat.WIDE,
+        )
+        production = sum(sum(expr[!, n]) for n in names(expr) if n != "DateTime")
+        return get_objective_value(results), production
+    end
+    pairs = [
+        (ThermalBasicUnitCommitment, ThermalBasicCompactUnitCommitment),
+        (ThermalStandardUnitCommitment, ThermalCompactUnitCommitment),
+        (ThermalBasicDispatch, ThermalCompactDispatch),
+    ]
+    cases = [
+        ("linear_cost", () -> build_system(PSITestSystems, "c_linear_cost_test")),
+        ("linear_cost_vom", () -> _set_vom!(build_system(PSITestSystems, "c_linear_cost_test"), 3.0)),
+        ("linear_fuel", () -> build_system(PSITestSystems, "c_linear_fuel_test")),
+        ("pwl_io_cost_vom", () -> _set_vom!(build_system(PSITestSystems, "c_pwl_io_cost_test"), 3.0)),
+        ("sys5_uc_linear", () -> _linearize_costs!(build_system(PSITestSystems, "c_sys5_uc"))),
+    ]
+    for (label, make_sys) in cases, (full, compact) in pairs
+        # c_sys5_uc's ramps bind, and Compact's ramp limits differ from Standard's (separate fix)
+        label == "sys5_uc_linear" && full == ThermalStandardUnitCommitment && continue
+        @testset "$label: $(nameof(compact)) = $(nameof(full))" begin
+            obj_full, prod_full = _solve(make_sys(), full, label)
+            obj_compact, prod_compact = _solve(make_sys(), compact, label)
+            @test isapprox(obj_compact, obj_full; rtol = 1e-7)
+            @test isapprox(prod_compact, prod_full; rtol = 1e-7)
+            @test isapprox(prod_compact, obj_compact; rtol = 1e-7)
+        end
+    end
+end
+
 ################################### Unit Commitment tests ##################################
 @testset "Thermal UC With DC - PF" begin
     bin_variable_keys = [

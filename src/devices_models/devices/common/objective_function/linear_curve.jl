@@ -1,3 +1,69 @@
+##################################################
+#### Compact formulations: the P_min · on part ####
+##################################################
+# A compact thermal formulation (`PowerAboveMinimumVariable`) models output as
+# P_min · on + p, so a cost proportional to output charged on p alone leaves the
+# output up to P_min free. This adds the missing part, P_min · on times the same
+# per-unit, per-step coefficient, with the on-status taken as the compact
+# piecewise-linear constraint and the compact fuel consumption expression take it
+# (`_get_sos_value`: the OnVariable, else the OnStatusParameter, else 1.0).
+# No-op for every other variable and formulation.
+_add_compact_pmin_proportional_cost!(
+    ::OptimizationContainer,
+    ::VariableType,
+    ::PSY.Component,
+    ::Float64,
+    ::AbstractDeviceFormulation,
+    ::Type{<:ExpressionType},
+) = nothing
+
+function _add_compact_pmin_proportional_cost!(
+    container::OptimizationContainer,
+    ::PowerAboveMinimumVariable,
+    component::T,
+    proportional_term_per_unit::Float64,
+    ::U,
+    ::Type{E},
+) where {
+    T <: PSY.ThermalGen,
+    U <: Union{AbstractCompactUnitCommitment, ThermalCompactDispatch},
+    E <: ExpressionType,
+}
+    iszero(proportional_term_per_unit) && return
+    P_min = PSY.get_active_power_limits(component).min
+    iszero(P_min) && return
+    resolution = get_resolution(container)
+    dt = Dates.value(resolution) / MILLISECONDS_IN_HOUR
+    coefficient = proportional_term_per_unit * dt * P_min
+    name = PSY.get_name(component)
+    sos_val = _get_sos_value(container, U, component)
+    for t in get_time_steps(container)
+        if sos_val == SOSStatusVariable.VARIABLE
+            cost = _add_proportional_term!(
+                container,
+                get_default_on_variable(component),
+                component,
+                coefficient,
+                t,
+            )
+        else
+            cost = JuMP.AffExpr(0.0)
+            if sos_val == SOSStatusVariable.PARAMETER
+                param = get_default_on_parameter(component)
+                bin = get_parameter(container, param, T).parameter_array[name, t]
+                JuMP.add_to_expression!(cost, coefficient, bin)
+            elseif sos_val == SOSStatusVariable.NO_VARIABLE
+                JuMP.add_to_expression!(cost, coefficient)
+            else
+                error("Unhandled SOSStatusVariable value $sos_val")
+            end
+            add_to_objective_invariant_expression!(container, cost)
+        end
+        add_to_expression!(container, E, cost, component, t)
+    end
+    return
+end
+
 # Add proportional terms to objective function and expression
 function _add_linearcurve_variable_term_to_model!(
     container::OptimizationContainer,
@@ -99,6 +165,14 @@ function _add_variable_cost_to_objective!(
         component,
         multiplier * proportional_term_per_unit,
     )
+    _add_compact_pmin_proportional_cost!(
+        container,
+        T(),
+        component,
+        multiplier * proportional_term_per_unit,
+        U(),
+        FuelCostExpression,
+    )
     return
 end
 
@@ -161,6 +235,18 @@ function _add_variable_cost_to_objective!(
         fuel_curve_per_unit,
         fuel_cost,
     )
+    # A time-varying fuel cost is charged on FuelConsumptionExpression, which
+    # already holds P_min · on under a compact formulation.
+    if fuel_cost isa Float64
+        _add_compact_pmin_proportional_cost!(
+            container,
+            T(),
+            component,
+            fuel_curve_per_unit * fuel_cost,
+            U(),
+            FuelCostExpression,
+        )
+    end
     return
 end
 
